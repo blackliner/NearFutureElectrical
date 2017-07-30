@@ -63,13 +63,17 @@ namespace NearFutureElectrical
         [KSPField(isPersistant = false)]
         public float MaximumTemperature = 2000f;
 
-        // Current reactor power setting (0-100, tweakable)
-        [KSPField(isPersistant = true, guiActive = true, guiName = "Power Setting"), UI_FloatRange(minValue = 0f, maxValue = 100f, stepIncrement = 1f)]
-        public float CurrentPowerPercent = 100f;
+        // Current reactor power setting (0-100, tweakable), default value set at OverriddenStart()
+        [KSPField(isPersistant = true, guiActive = true, guiName = "Power Setting", guiUnits ="%"), UI_FloatRange(minValue = 0f, maxValue = 100f, stepIncrement = 1f)]
+        public float CurrentPowerPercent = -1f;
 
         // Actual reactor power setting used (0-100, read-only)
         [KSPField(isPersistant = false)]
         public float ActualPowerPercent = 100f;
+
+        //enable automated mode
+        [KSPField(isPersistant = true)]
+        public bool AutomatedMode = true;
 
         // Curve relating available power to temperature. Generally should be of the form
         // AmbientTemp  0
@@ -297,16 +301,26 @@ namespace NearFutureElectrical
           Events["ShowReactorControl"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Event_ShowReactorControl");
           Events["RepairReactor"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Event_RepairReactor");
 
-          Fields["CurrentSafetyOverride"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CurrentSafetyOverride");
-          Fields["CurrentPowerPercent"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CurrentPowerPercent");
+          Fields["CurrentSafetyOverride"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CurrentSafetyOverride");          
           Fields["ReactorOutput"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_ReactorOutput");
           Fields["ThermalTransfer"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_ThermalTransfer");
           Fields["CoreTemp"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CoreTemp");
           Fields["CoreStatus"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CoreStatus");
           Fields["FuelStatus"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_FuelStatus");
 
+            if (AutomatedMode)
+            {
+                Fields["CurrentPowerPercent"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CurrentTargetEClevel");
+                CurrentPowerPercent = CurrentPowerPercent < 0 ? 90 : CurrentPowerPercent;
+            }
+            else
+            {
+                Fields["CurrentPowerPercent"].guiName = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CurrentPowerPercent");
+                CurrentPowerPercent = CurrentPowerPercent < 0 ? 100 : CurrentPowerPercent;
+            }
 
-          if (FirstLoad)
+
+            if (FirstLoad)
           {
             this.CurrentSafetyOverride = this.CriticalTemperature;
             FirstLoad = false;
@@ -348,6 +362,10 @@ namespace NearFutureElectrical
               }
           }
         }
+
+        private double lastCurrentEC = 0;
+        private float percentPerPower = 1;
+
         public void OverriddenFixedUpdate()
         {
           if (HighLogic.LoadedScene == GameScenes.FLIGHT)
@@ -359,13 +377,47 @@ namespace NearFutureElectrical
                   if (reactorEngine != null)
                     ActualPowerPercent = Math.Max(throttleCurve.Evaluate(100 * this.vessel.ctrlState.mainThrottle * reactorEngine.GetThrustLimiterFraction()), CurrentPowerPercent);
               }
-              else {
-                  ActualPowerPercent = CurrentPowerPercent;
+              else if(AutomatedMode)
+                {
+                    vessel.GetConnectedResourceTotals(PartResourceLibrary.Instance.GetDefinition("ElectricCharge").id, out double currentEC, out double maxEC);
+                    double delta = (CurrentPowerPercent/100)*maxEC - currentEC;
 
-              }
+                    double ECperSecond = (currentEC - lastCurrentEC) / TimeWarp.fixedDeltaTime;
+                    lastCurrentEC = currentEC;
 
-              // Update reactor core integrity readout
-              if (CoreIntegrity > 0)
+                    float cgp = CurrentGeneratedPower();
+
+                    if (cgp > 0 && ActualPowerPercent > 0)
+                        percentPerPower = ActualPowerPercent / cgp;
+
+                    float currentLosses = cgp - (float)ECperSecond;
+
+                    float targetECperSecond = (float)delta / 1f; //reach target in 1s
+
+                    float newAPP = (currentLosses + targetECperSecond) * percentPerPower;                    
+                    
+
+                    //Debug.Log("BLACKLINE's awesome Calculations:");
+                    //Debug.Log("BLACKLINE's ActualPowerPercent = " + ActualPowerPercent.ToString());
+                    //Debug.Log("BLACKLINE's delta = " + delta.ToString());
+                    //Debug.Log("BLACKLINE's ECperSecond = " + ECperSecond.ToString());
+                    //Debug.Log("BLACKLINE's CurrentGeneratedPower = " + cgp.ToString());
+                    //Debug.Log("BLACKLINE's powerPerPercent = " + percentPerPower.ToString());
+                    //Debug.Log("BLACKLINE's currentLosses = " + currentLosses.ToString());
+                    //Debug.Log("BLACKLINE's targetECperSecond = " + targetECperSecond.ToString());
+
+                    //we got some time left 
+                    ActualPowerPercent = Mathf.Clamp(newAPP, 0f, 100f);
+                    //Debug.Log("BLACKLINE's new ActualPowerPercent = " + ActualPowerPercent.ToString());
+
+                }
+                else
+                {
+                    ActualPowerPercent = CurrentPowerPercent;
+                }
+
+                // Update reactor core integrity readout
+                if (CoreIntegrity > 0)
                   CoreStatus = String.Format("{0:F2} %", CoreIntegrity);
               else
                   CoreStatus = Localizer.Format("#LOC_NFElectrical_ModuleFissionReactor_Field_CoreStatus_Meltdown");
@@ -427,9 +479,7 @@ namespace NearFutureElectrical
                 RecalculateRatios(ActualPowerPercent / 100f);
 
                 // Find the time remaining at current rate
-                FuelStatus = FindTimeRemaining(
-                  this.part.Resources.Get(PartResourceLibrary.Instance.GetDefinition(FuelName).id).amount,
-                  rate);
+                FuelStatus = FindTimeRemaining( this.part.Resources.Get(PartResourceLibrary.Instance.GetDefinition(FuelName).id).amount, rate);
             }
         }
 
@@ -513,6 +563,27 @@ namespace NearFutureElectrical
                     //Utils.Log ("FissionReactor: Consumer left "+ remainingPower.ToString()+ " kW");
                 }
             }
+        }
+
+        private float CurrentGeneratedPower()
+        {
+            List<FissionConsumer> consumers = GetOrderedConsumers();
+
+            float CurrentGeneration = 0;
+
+            // Iterate through all consumers and sum up CurrentGeneration
+            for (int i = 0; i < consumers.Count; i++)
+            {
+                if (consumers[i].Status)
+                {
+                    if (consumers[i] is FissionGenerator)
+                    {
+                        CurrentGeneration += ((FissionGenerator)consumers[i]).CurrentGeneration;
+                    }
+                }
+            }
+
+            return CurrentGeneration;
         }
 
         private void DoHeatConsumption_V1()

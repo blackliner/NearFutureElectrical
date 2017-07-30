@@ -55,25 +55,19 @@ namespace NearFutureElectrical
               {
 
                   double generated = (double)(Mathf.Clamp01(CurrentHeatUsed / HeatUsed) * PowerGeneration);
-
-                  double delta = 0d;
-                  for (int i = 0; i < this.vessel.parts.Count; i++)
-
-                  {
-                      if (this.vessel.parts[i].Resources.Get(PartResourceLibrary.Instance.GetDefinition("ElectricCharge").id) != null)
-                           delta += this.vessel.parts[i].Resources.Get(PartResourceLibrary.Instance.GetDefinition("ElectricCharge").id).maxAmount -
-                                this.vessel.parts[i].Resources.Get(PartResourceLibrary.Instance.GetDefinition("ElectricCharge").id).amount;
-                  }
+                    
+                  vessel.GetConnectedResourceTotals(PartResourceLibrary.Instance.GetDefinition("ElectricCharge").id, out double currentEC, out double maxEC);
+                  double delta = maxEC - currentEC;
 
                   double generatedActual = Math.Min(delta, TimeWarp.fixedDeltaTime * generated);
 
-                  double amt = this.part.RequestResource("ElectricCharge",  -generatedActual);
+                  double amt = part.RequestResource("ElectricCharge",  -generatedActual);
 
                   if (double.IsNaN(generated))
                       generated = 0.0;
 
-                  CurrentGeneration = (float)generated;
-                  GeneratorStatus = String.Format("{0:F1} Ec/s", generated);
+                  CurrentGeneration = (float)generatedActual / TimeWarp.fixedDeltaTime;
+                  GeneratorStatus = String.Format("{0:F1} Ec/s", CurrentGeneration);
               }
               else
                   GeneratorStatus = Localizer.Format("#LOC_NFElectrical_ModuleFissionGenerator_Field_GeneratorStatus_Offline");
